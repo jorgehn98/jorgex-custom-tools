@@ -27,15 +27,43 @@ const joinProjectPath = (directory: string, script: string) => {
   return `${normalizedDirectory}/${normalizedScript}`;
 };
 
+// Resolve the user-level OpenCode config directory (cross-platform).
+const getGlobalConfigDir = (): string => {
+  const explicit = process.env.OPENCODE_CONFIG_DIR;
+  if (explicit) return explicit.replace(/[\\/]+$/, "");
+
+  const home =
+    process.env.HOME ||
+    process.env.USERPROFILE ||
+    (process.env.HOMEDRIVE && process.env.HOMEPATH
+      ? `${process.env.HOMEDRIVE}${process.env.HOMEPATH}`
+      : "");
+
+  if (!home) return "";
+  return `${home.replace(/[\\/]+$/, "")}/.config/opencode`;
+};
+
 const runScript = async (
   client: any,
   directory: string,
   script: string,
   payload?: unknown,
 ): Promise<ScriptResult> => {
-  const scriptPath = isAbsolutePath(script)
-    ? script
-    : joinProjectPath(directory, script);
+  // Scripts may be tagged as `<baseDir>\u0000<script>` so each is resolved
+  // against the config that declared it (global vs project). Untagged scripts
+  // fall back to the runtime directory.
+  let baseDir = directory;
+  let rawScript = script;
+  const sep = script.indexOf("\u0000");
+  if (sep !== -1) {
+    baseDir = script.slice(0, sep) || directory;
+    rawScript = script.slice(sep + 1);
+  }
+
+  const scriptPath = isAbsolutePath(rawScript)
+    ? rawScript
+    : joinProjectPath(baseDir, rawScript);
+  const cwd = baseDir;
   const stdin = payload ? JSON.stringify(payload) : "";
   const stdinSource = new Response(stdin);
 
@@ -83,7 +111,7 @@ const runScript = async (
   if (!command) {
     await client.app.log({
       body: {
-        service: "photo-heart-hooks",
+        service: "hooks",
         level: "warn",
         message: "Unsupported hook script extension",
         extra: { script, scriptPath },
@@ -100,7 +128,7 @@ const runScript = async (
       stdin: stdinSource,
       stdout: "pipe",
       stderr: "pipe",
-      cwd: directory,
+      cwd,
       env: spawnEnv,
     });
 
@@ -113,7 +141,7 @@ const runScript = async (
     if (exitCode !== 0) {
       await client.app.log({
         body: {
-          service: "photo-heart-hooks",
+          service: "hooks",
           level: "error",
           message: "Hook script execution failed",
           extra: {
@@ -131,7 +159,7 @@ const runScript = async (
   } catch (error) {
     await client.app.log({
       body: {
-        service: "photo-heart-hooks",
+        service: "hooks",
         level: "error",
         message: "Hook script execution failed",
         extra: {
@@ -310,7 +338,7 @@ const logInvalidHookConfig = async (
 ) => {
   await client.app.log({
     body: {
-      service: "photo-heart-hooks",
+      service: "hooks",
       level: "warn",
       message: "Invalid hook config ignored",
       extra: {
@@ -441,30 +469,146 @@ const runScripts = async (
 export const HooksPlugin: Plugin = async ({ client, directory, worktree }) => {
   const initialWorktreePath = normalizeWorktreePath(worktree);
 
-  const loadConfig = async (configDirectory = directory): Promise<HookConfig> => {
+  const globalConfigDir = getGlobalConfigDir();
+
+  const readHookFile = async (configPath: string): Promise<HookConfig | null> => {
     try {
-      const configPath = `${configDirectory}/.opencode/hooks.json`;
       const content = await (globalThis as any).Bun.file(configPath).text();
       return JSON.parse(content);
     } catch (error) {
-      if (configDirectory !== directory) {
-        return loadConfig(directory);
-      }
-
       if (error instanceof Error && error.name !== "ENOENT") {
         await client.app.log({
           body: {
-            service: "photo-heart-hooks",
+            service: "hooks",
             level: "warn",
             message: "Failed to load hooks config",
-            extra: {
-              error: error.message,
-            },
+            extra: { configPath, error: error.message },
           },
         });
       }
-      return {};
+      return null;
     }
+  };
+
+  // Merge two hook configs. Scripts from both are concatenated per event/tool/trigger.
+  // Global scripts are resolved against the global config dir; project scripts against the project.
+  const mergeHookConfigs = (
+    base: HookConfig,
+    incoming: HookConfig,
+  ): HookConfig => {
+    const result: HookConfig = { ...base };
+
+    for (const [event, eventValue] of Object.entries(incoming)) {
+      if (!isPlainObject(eventValue)) {
+        if (result[event] === undefined) result[event] = eventValue;
+        continue;
+      }
+
+      const baseEvent = isPlainObject(result[event])
+        ? { ...(result[event] as Record<string, unknown>) }
+        : {};
+
+      for (const [tool, toolValue] of Object.entries(eventValue)) {
+        const baseTool = baseEvent[tool];
+
+        if (isStringArray(toolValue)) {
+          baseEvent[tool] = isStringArray(baseTool)
+            ? [...baseTool, ...toolValue]
+            : [...toolValue];
+          continue;
+        }
+
+        if (isPlainObject(toolValue)) {
+          const mergedTriggers: Record<string, unknown> = isPlainObject(baseTool)
+            ? { ...(baseTool as Record<string, unknown>) }
+            : {};
+          for (const [trigger, scripts] of Object.entries(toolValue)) {
+            const existing = mergedTriggers[trigger];
+            if (isStringArray(scripts)) {
+              mergedTriggers[trigger] = isStringArray(existing)
+                ? [...existing, ...scripts]
+                : [...scripts];
+            } else if (mergedTriggers[trigger] === undefined) {
+              mergedTriggers[trigger] = scripts;
+            }
+          }
+          baseEvent[tool] = mergedTriggers;
+          continue;
+        }
+
+        if (baseEvent[tool] === undefined) baseEvent[tool] = toolValue;
+      }
+
+      result[event] = baseEvent;
+    }
+
+    return result;
+  };
+
+  // Tag every script path with the base directory it must be resolved against.
+  // Global scripts use the global config dir; project scripts use the project dir.
+  const tagScriptsWithBase = (config: HookConfig, baseDir: string): HookConfig => {
+    const tagList = (scripts: string[]) =>
+      scripts.map((s) => `${baseDir}\u0000${s}`);
+
+    const result: HookConfig = {};
+    for (const [event, eventValue] of Object.entries(config)) {
+      if (!isPlainObject(eventValue)) {
+        result[event] = eventValue;
+        continue;
+      }
+      const newEvent: Record<string, unknown> = {};
+      for (const [tool, toolValue] of Object.entries(eventValue)) {
+        if (isStringArray(toolValue)) {
+          newEvent[tool] = tagList(toolValue);
+        } else if (isPlainObject(toolValue)) {
+          const newTriggers: Record<string, unknown> = {};
+          for (const [trigger, scripts] of Object.entries(toolValue)) {
+            newTriggers[trigger] = isStringArray(scripts)
+              ? tagList(scripts)
+              : scripts;
+          }
+          newEvent[tool] = newTriggers;
+        } else {
+          newEvent[tool] = toolValue;
+        }
+      }
+      result[event] = newEvent;
+    }
+    return result;
+  };
+
+  const loadConfig = async (configDirectory = directory): Promise<HookConfig> => {
+    // Project-level hooks: prefer the runtime directory, fall back to the plugin directory.
+    let projectConfig: HookConfig = {};
+    let projectBase = configDirectory;
+
+    const runtimeConfig = await readHookFile(
+      `${configDirectory}/.opencode/hooks.json`,
+    );
+    if (runtimeConfig) {
+      projectConfig = runtimeConfig;
+      projectBase = configDirectory;
+    } else if (configDirectory !== directory) {
+      const fallbackConfig = await readHookFile(
+        `${directory}/.opencode/hooks.json`,
+      );
+      if (fallbackConfig) {
+        projectConfig = fallbackConfig;
+        projectBase = directory;
+      }
+    }
+    projectConfig = tagScriptsWithBase(projectConfig, projectBase);
+
+    // Global user-level hooks (~/.config/opencode/hooks.json).
+    let globalConfig: HookConfig = {};
+    if (globalConfigDir) {
+      const raw = await readHookFile(`${globalConfigDir}/hooks.json`);
+      if (raw) globalConfig = tagScriptsWithBase(raw, globalConfigDir);
+    }
+
+    // Global first, then project (the project can add more scripts on top).
+    return mergeHookConfigs(globalConfig, projectConfig);
   };
 
   return {

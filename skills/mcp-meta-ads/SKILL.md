@@ -11,7 +11,7 @@ description: >
 
 # MCP de Meta Ads — PhotoHeart
 
-MCP propio ubicado en `C:/Users/jorge/Desktop/jorgex-custom-tools/mcps/meta-ads-mcp/`.
+MCP propio ubicado en `C:/dev/work/jorgex-custom-tools/mcps/meta-ads-mcp/`.
 **40 tools** que cubren todo el ciclo de vida de campañas en Meta (Facebook + Instagram).
 **API version:** v22.0
 

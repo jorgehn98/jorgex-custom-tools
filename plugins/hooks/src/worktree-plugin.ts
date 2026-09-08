@@ -133,7 +133,7 @@ const runScript = async (
   if (!command) {
     await client.app.log({
       body: {
-        service: "photo-heart-hooks",
+        service: "hooks",
         level: "warn",
         message: "Unsupported worktree hook script extension",
         extra: { script, scriptPath },
@@ -164,7 +164,7 @@ const runScript = async (
     if (exitCode !== 0) {
       await client.app.log({
         body: {
-          service: "photo-heart-hooks",
+          service: "hooks",
           level: "error",
           message: "Worktree hook script execution failed",
           extra: {
@@ -182,7 +182,7 @@ const runScript = async (
   } catch (error) {
     await client.app.log({
       body: {
-        service: "photo-heart-hooks",
+        service: "hooks",
         level: "error",
         message: "Worktree hook script execution failed",
         extra: {
@@ -390,7 +390,7 @@ export const WorktreePlugin: Plugin = async ({ $, client, directory }) => {
       } catch (error) {
         await client.app.log({
           body: {
-            service: "photo-heart-hooks",
+            service: "hooks",
             level: "error",
             message: "Worktree plugin execution failed",
             extra: {

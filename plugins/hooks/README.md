@@ -13,6 +13,25 @@ so a project can add scripts on top of the global ones.
 > Exports: `HooksPlugin` (hooks) and `WorktreePlugin` (worktree) from `src/`.
 > Previously named `photo-heart-hooks`; renamed to `hooks` to be project-agnostic.
 
+## Project worktree tools
+
+`src/worktree-tools.ts` exposes configurable create/setup tools for projects that keep
+their worktree scripts under `scripts/worktree/`. When a configured script ends in
+`.ps1`, the runner uses a sibling `.mjs` file when it exists and otherwise executes
+the configured PowerShell script. This lets projects migrate scripts independently
+without changing their tool configuration or requiring PowerShell on Linux once the
+Node scripts are present.
+
+Node scripts receive the same stdin and command arguments as their PowerShell
+counterparts. They must keep the created worktree path on stdout; diagnostics belong
+on stderr.
+
+Run the package tests with:
+
+```bash
+npm test
+```
+
 ---
 
 ## hooks.json format

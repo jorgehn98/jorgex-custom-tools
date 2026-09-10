@@ -1,11 +1,6 @@
-import { spawn } from "node:child_process";
 import path from "node:path";
 import { type Plugin, tool } from "@opencode-ai/plugin";
-
-type RunResult = {
-  stdout: string;
-  stderr: string;
-};
+import { getScriptCommand, runProcess, selectScript } from "./script-runner.ts";
 
 type WorktreeToolsOptions = {
   createToolName?: string;
@@ -32,54 +27,6 @@ const renderTemplate = (value: string, vars: Record<string, string>) =>
     (result, [key, replacement]) => replaceToken(result, `{${key}}`, replacement),
     value,
   );
-
-const runProcess = (
-  command: string,
-  args: string[],
-  options: { cwd: string; stdin?: string; detached?: boolean },
-) => {
-  return new Promise<RunResult>((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: options.cwd,
-      shell: false,
-      windowsHide: !options.detached,
-      detached: options.detached ?? false,
-      stdio: options.detached ? "ignore" : ["pipe", "pipe", "pipe"],
-    });
-
-    if (options.detached) {
-      child.unref();
-      resolve({ stdout: "", stderr: "" });
-      return;
-    }
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-
-    child.stderr?.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-        return;
-      }
-
-      reject(new Error(`${command} exited with code ${code}\n${stderr || stdout}`.trim()));
-    });
-
-    if (options.stdin) {
-      child.stdin?.write(options.stdin);
-    }
-    child.stdin?.end();
-  });
-};
 
 const getProjectRoot = (context: { worktree?: string; directory?: string }, fallback: { worktree?: string; directory?: string }) =>
   context.worktree || fallback.worktree || context.directory || fallback.directory || process.cwd();
@@ -112,12 +59,16 @@ export default (async ({ directory, worktree }, options?: WorktreeToolsOptions) 
         },
         async execute(args, context) {
           const root = getProjectRoot(context, { directory, worktree });
-          const scriptPath = resolvePath(root, config.createScript);
+          const scriptPath = selectScript(resolvePath(root, config.createScript));
           const input = JSON.stringify({ name: args.name, directory: context.directory || directory || root });
+          const [command, ...commandArgs] = getScriptCommand(
+            scriptPath,
+            config.powershellCommand,
+          );
 
           const result = await runProcess(
-            config.powershellCommand,
-            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+            command,
+            commandArgs,
             { cwd: root, stdin: input },
           );
 
@@ -156,11 +107,16 @@ export default (async ({ directory, worktree }, options?: WorktreeToolsOptions) 
         async execute(_args, context) {
           const root = getProjectRoot(context, { directory, worktree });
           const target = context.directory || directory || root;
-          const scriptPath = resolvePath(root, config.setupScript);
+          const scriptPath = selectScript(resolvePath(root, config.setupScript));
+          const [command, ...commandArgs] = getScriptCommand(
+            scriptPath,
+            config.powershellCommand,
+            ["-WorktreePath", target, "-Action", "setup"],
+          );
 
           const result = await runProcess(
-            config.powershellCommand,
-            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-WorktreePath", target, "-Action", "setup"],
+            command,
+            commandArgs,
             { cwd: root },
           );
 

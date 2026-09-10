@@ -18,8 +18,12 @@ export const selectScript = (configuredPath: string) => {
   if (extension !== ".ps1" && extension !== ".mjs") return configuredPath;
 
   const basePath = configuredPath.slice(0, -extension.length);
+  if (extension === ".mjs") {
+    return existsSync(configuredPath) ? configuredPath : `${basePath}.ps1`;
+  }
+
   const nodePath = `${basePath}.mjs`;
-  return existsSync(nodePath) ? nodePath : `${basePath}.ps1`;
+  return existsSync(nodePath) ? nodePath : configuredPath;
 };
 
 export const getScriptCommand = (
